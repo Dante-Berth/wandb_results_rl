@@ -1,0 +1,4 @@
+wandb
+plotly
+pandas
+numpy
