@@ -23,7 +23,7 @@ for run in runs:
     history = run.history(keys=[key, "_step"])
 
     if history is not None and not history.empty:
-        history = history[history["_step"] <= int(1e6) + 5000]
+        history = history[history["_step"] <= int(6e5) + 5000]
         history["seed"] = seed  # Tag with seed
         all_data[f"seed_{seed}"] = history
 
@@ -84,15 +84,21 @@ if all_data:
 
     # Layout settings with custom x-axis ticks and labels
     fig.update_layout(
-        title="Episodic Return Over Time (Aggregated Across Seeds)",
         xaxis_title="Million Steps",
         yaxis_title="Average Return",
         xaxis=dict(
             tickvals=[
-                i * int(1e5) for i in range(11)
+                i * int(1e5) for i in range(7)
             ],  # Values from 0.0M to 10M (adjust if needed)
-            ticktext=[f"{i / 10}" for i in range(11)],  # Labels from 0.0M to 1.0M
+            ticktext=[f"{i / 10}" for i in range(7)],  # Labels from 0.0M to 1.0M
+            tickfont=dict(size=18),  # Increase tick label font size
+            title_font=dict(size=18),  # Increase axis title font size
         ),
+        yaxis=dict(
+            tickfont=dict(size=18),  # Increase tick label font size
+            title_font=dict(size=18),  # Increase axis title font size
+        ),
+        
         template="plotly_white",
     )
 
