@@ -65,13 +65,9 @@ if __name__ == "__main__":
         entity="corporate-manu-sureli",
         project="SAC_IMAGE_TIB",
         run_ids=[
-            "fgt1rt8r",
-            "trwfkvmy",
-            "33f01rmn",
-            "lhwk49b4",
-            "phn6kqx3",
-            "sjm05wn4",
-            "26r063cr",
+            "47unqpd4",
+            "6sm7wps1",
+            "yrxwo7uv",
         ],
         output_dir="wandb_csv_exports",
     )
