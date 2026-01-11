@@ -2,72 +2,99 @@ import wandb
 import pandas as pd
 import os
 from tqdm import tqdm
+import multiprocessing as mp
 
 
-def download_wandb_history(
+def process_single_run(args):
+    (
+        entity,
+        project,
+        run_id,
+        run_name,
+        output_dir,
+        name_return,
+        name_length,
+    ) = args
+
+    api = wandb.Api()  # MUST be created inside the process
+
+    run_name = run_name or run_id
+    run_dir = os.path.join(output_dir, run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    print(f"▶ Processing {run_name} ({run_id})")
+
+    try:
+        run = api.run(f"{entity}/{project}/{run_id}")
+        out_path = os.path.join(run_dir, "history.csv")
+        history_iter = run.scan_history(keys=["_step", name_return, name_length])
+
+        records = []
+        for row in history_iter:
+            records.append(
+                {
+                    "step": row.get("_step"),
+                    "return": row.get(name_return),
+                    "length": row.get(name_length),
+                }
+            )
+
+        df = pd.DataFrame(records)
+
+        if df.empty:
+            print(f"⚠️  {run_name}: no valid data")
+            return
+        
+        df.to_csv(out_path, index=False)
+
+        print(f"✅ Saved {run_name}/history.csv")
+
+    except Exception as e:
+        print(f"❌ Error {run_name} ({run_id}): {e}")
+
+
+def download_all_wandb_histories_mp(
     entity: str,
     project: str,
-    run_ids: list,
     output_dir: str = "wandb_csv_exports",
-    name_discounted_episodic_return: str = "charts/discounted_cumulative_return",
-    name_episodic_length: str = "charts/episodic_length",
+    name_return: str = "charts/return",
+    name_length: str = "charts/length",
+    num_workers: int | None = None,
 ):
-    """
-    Downloads selected run histories from Weights & Biases using scan_history(),
-    saves relevant metrics to CSV files in the output directory.
-
-    Parameters:
-    - entity (str): WandB entity/team name.
-    - project (str): WandB project name.
-    - run_ids (list): List of WandB run IDs to download.
-    - output_dir (str): Folder to save the resulting CSV files.
-    """
-    # Authenticate
     wandb.login()
+    api = wandb.Api()
 
-    # Create output folder if not exists
     os.makedirs(output_dir, exist_ok=True)
 
-    for run_id in run_ids:
-        print(f"\nProcessing run: {run_id}")
-        try:
-            run = wandb.Api().run(f"{entity}/{project}/{run_id}")
-            history_iter = run.scan_history()
+    runs = api.runs(f"{entity}/{project}")
+    print(f"Found {len(runs)} runs")
 
-            records = []
-            for row in tqdm(history_iter, desc=f"Downloading {run_id}", unit="step"):
-                record = {
-                    "_step": row.get("_step"),
-                    "discounted_cumulative_return": row.get(
-                        name_discounted_episodic_return
-                    ),
-                    "episodic_length": row.get(name_episodic_length),
-                }
-                records.append(record)
+    tasks = [
+        (
+            entity,
+            project,
+            run.id,
+            run.name,
+            output_dir,
+            name_return,
+            name_length,
+        )
+        for run in runs
+    ]
 
-            df = pd.DataFrame(records)
-            df = df.dropna(
-                subset=["discounted_cumulative_return", "episodic_length"]
-            ).copy()
-            df = df.sort_values("_step")
-            df["steps"] = df["episodic_length"].cumsum()
+    if num_workers is None:
+        num_workers = min(8, mp.cpu_count())
 
-            out_path = os.path.join(output_dir, f"{run_id}.csv")
-            df.to_csv(out_path, index=False)
-            print(f"✅ Saved: {out_path}")
+    print(f"Using {num_workers} workers")
 
-        except Exception as e:
-            print(f"❌ Error with run {run_id}: {e}")
+    with mp.get_context("spawn").Pool(num_workers) as pool:
+        pool.map(process_single_run, tasks)
 
 
 if __name__ == "__main__":
-    download_wandb_history(
-        entity="corporate-manu-sureli",
-        project="SAC_IMAGE_TIB",
-        run_ids=[
-            "47unqpd4",
-            "6sm7wps1",
-            "yrxwo7uv",
-        ],
+    download_all_wandb_histories_mp(
+        entity="thomas-phd",
+        project="SAC_ASYNC_TIP",
         output_dir="wandb_csv_exports",
+        num_workers=18,
     )
