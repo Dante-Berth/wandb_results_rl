@@ -1,104 +1,151 @@
-import wandb
+import os
+import re
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
-# Initialize the Weights & Biases API
-api = wandb.Api()
+plt.style.use("tableau-colorblind10")
 
-# Replace with your specific project and entity details
-wandb_project_name = "SAC_IMAGE_SIMPLE_PHYSIGYM"
-wandb_entity = "corporate-manu-sureli"
 
-# Fetch all runs from the specified project
-runs = api.runs(f"{wandb_entity}/{wandb_project_name}")
+def parse_folder_name(folder_name):
+    """
+    Returns (seed:int, obs_type:str) or (None, None) if parsing fails
+    """
+    pattern = r"async_sac_tip_(\d+)_([a-zA-Z0-9_]+)_\d+"
+    match = re.match(pattern, folder_name)
+    if not match:
+        return None, None
+    seed = int(match.group(1))
+    obs_type = match.group(2)
+    return seed, obs_type
 
-# Key corresponding to episodic return in W&B logs
-key = "charts/episodic_return"
-all_data = {}
 
-# Iterate through each run to collect relevant data
-for run in runs:
-    seed = run.config.get("seed", None)  # Extract seed value if available
-    print(f"Processing seed: {seed}")
+csv_root = "./wandb_csv_exports"
 
-    # Retrieve the full training history for the episodic return metric
-    history = run.history(keys=[key, "_step"])
 
-    # Filter and process data if available
-    if history is not None and not history.empty:
-        history = history[history["_step"] <= int(6e5) + 5000]  # Limit data to 600k steps + buffer
-        history["seed"] = seed  # Tag each entry with its seed value
-        all_data[f"seed_{seed}"] = history
+def load_all_runs(csv_root):
+    """
+    Returns:
+        dict[obs_type] -> list of DataFrames (one per seed)
+    """
+    groups = defaultdict(list)
 
-# Combine all individual run data into a single DataFrame
-if all_data:
-    df = pd.concat(all_data, ignore_index=False)
-    
-    # Reshape data for easier visualization
-    reshaped_df = df.pivot(index="_step", columns="seed", values="charts/episodic_return")
-    reshaped_df.columns = [f"seed_{col}" for col in reshaped_df.columns]
-    reshaped_df = reshaped_df.interpolate(method="linear", axis=0)  # Fill missing values
+    for folder in os.listdir(csv_root):
+        folder_path = os.path.join(csv_root, folder)
+        if not os.path.isdir(folder_path):
+            continue
 
-    # Compute statistical measures (mean, min, max) across first 4 seeds
-    reshaped_df["mean"] = reshaped_df[["seed_1", "seed_2", "seed_3", "seed_4"]].mean(axis=1)
-    reshaped_df["min"] = reshaped_df[["seed_1", "seed_2", "seed_3", "seed_4"]].min(axis=1)
-    reshaped_df["max"] = reshaped_df[["seed_1", "seed_2", "seed_3", "seed_4"]].max(axis=1)
+        seed, obs_type = parse_folder_name(folder)
+        if seed is None:
+            continue
 
-    # Create a Plotly figure
-    fig = go.Figure()
+        csv_path = os.path.join(folder_path, "history.csv")
+        if not os.path.exists(csv_path):
+            continue
 
-    # Add shaded region for min-max range
-    fig.add_trace(
-        go.Scatter(
-            x=reshaped_df.index,
-            y=reshaped_df["max"],
-            fill=None,
-            line=dict(color="rgba(0,0,255,0)"),  # Transparent line
-            showlegend=False,
+        df = pd.read_csv(csv_path)
+        df = df[["step", "return"]].copy()
+        df["seed"] = seed
+
+        groups[obs_type].append(df)
+
+    return groups
+
+
+groups = load_all_runs(csv_root)
+
+
+def prepare_group_data_rolling_then_mean(all_data, window=100):
+    """
+    all_data: list of DataFrames with columns [step, return, seed]
+    """
+    if not all_data:
+        return None
+
+    df = pd.concat(all_data, ignore_index=True)
+
+    # Pivot: step × seed
+    reshaped = df.pivot(index="step", columns="seed", values="return")
+    reshaped = reshaped.sort_index()
+    reshaped = reshaped.interpolate(method="linear", axis=0)
+
+    # Rolling mean per seed
+    smoothed = reshaped.copy()
+    for seed in smoothed.columns:
+        smoothed[seed] = (
+            smoothed[seed].rolling(window=window, center=True, min_periods=1).mean()
         )
+
+    # Aggregate across seeds
+    out = pd.DataFrame(index=smoothed.index)
+    out["mean"] = smoothed.mean(axis=1)
+    out["min"] = smoothed.min(axis=1)
+    out["max"] = smoothed.max(axis=1)
+    out["std"] = smoothed.std(axis=1)
+
+    return out
+
+
+aggregated = {}
+
+for obs_type, dfs in groups.items():
+    aggregated[obs_type] = prepare_group_data_rolling_then_mean(dfs, window=100)
+
+
+fig, (ax_main, ax_zoom) = plt.subplots(
+    ncols=2,
+    figsize=(14, 6),
+    gridspec_kw={"width_ratios": [3, 1]},  # 75% / 25%
+)
+
+# ---- main plot (full range) ----
+for obs_type, df in aggregated.items():
+    if df is None:
+        continue
+
+    ax_main.plot(df.index, df["mean"], label=obs_type)
+    ax_main.fill_between(
+        df.index,
+        df["mean"] - df["std"],
+        df["mean"] + df["std"],
+        alpha=0.2,
     )
 
-    fig.add_trace(
-        go.Scatter(
-            x=reshaped_df.index,
-            y=reshaped_df["min"],
-            fill="tonexty",  # Fill between min and max
-            fillcolor="rgba(0,0,255,0.2)",  # Light blue shading
-            line=dict(color="rgba(0,0,255,0)"),  # Transparent line
-            showlegend=False,
-        )
+ax_main.set_xlabel("Step")
+ax_main.set_ylabel("Return")
+ax_main.set_title("Performance for different state spaces")
+ax_main.legend()
+ax_main.grid(True)
+
+# ---- zoom plot (restricted range) ----
+for obs_type, df in aggregated.items():
+    if df is None:
+        continue
+
+    ax_zoom.plot(df.index, df["mean"])
+    ax_zoom.fill_between(
+        df.index,
+        df["mean"] - df["std"],
+        df["mean"] + df["std"],
+        alpha=0.2,
     )
 
-    # Add mean episodic return curve
-    fig.add_trace(
-        go.Scatter(
-            x=reshaped_df.index,
-            y=reshaped_df["mean"],
-            line=dict(color="blue", width=2),  # Darker blue line
-            name="Mean Episodic Return",
-        )
-    )
+# Zoom limits
+ax_zoom.set_xlim(1.75e5, 2e5)
+ax_zoom.set_ylim(160, 185)
 
-    # Customize layout settings
-    fig.update_layout(
-        xaxis_title="Million Steps",
-        yaxis_title="Average Return",
-        xaxis=dict(
-            tickvals=[i * int(1e5) for i in range(7)],  # Tick positions (0M to 600k steps)
-            ticktext=[f"{i / 10}" for i in range(7)],  # Labels in millions
-            tickfont=dict(size=18),
-            title_font=dict(size=18),
-        ),
-        yaxis=dict(
-            tickfont=dict(size=18),
-            title_font=dict(size=18),
-        ),
-        template="plotly_white",
-    )
+ax_zoom.set_title("Zoom")
+ax_zoom.grid(True)
 
-    # Display the figure
-    fig.show()
+for ax in [ax_main, ax_zoom]:
+    ax.xaxis.set_major_formatter(ticker.ScalarFormatter(useMathText=True))
+    ax.ticklabel_format(style="sci", axis="x", scilimits=(0, 0))
 
-else:
-    print("No data found for the given key.")
+    # Optional: Ensure the offset text (the 'x10^5') is visible and formatted nicely
+    ax.xaxis.get_offset_text().set_fontsize(10)
+
+fig.savefig("performance.pdf", format="pdf", bbox_inches="tight")
+
+plt.tight_layout()
+plt.close()
